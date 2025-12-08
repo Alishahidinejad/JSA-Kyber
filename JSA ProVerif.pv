@@ -1,0 +1,131 @@
+(* Channel Definition *)  
+free PriCh : channel [private]. 
+free PubCh : channel.
+
+(* Private Parameters *)
+free ID_SM : bitstring [private].
+free ID_NESU : bitstring [private].
+free SSK : bitstring [private].
+
+(* Functions *)
+fun SHA2_1(bitstring) : bitstring.   
+fun SHA3_3(bitstring, bitstring, bitstring) : bitstring.       
+fun SHA3_5(bitstring, bitstring, bitstring, bitstring, bitstring) : bitstring.                                            
+fun AES2E_1(bitstring, bitstring) : bitstring.    
+fun AES2E_2(bitstring, bitstring, bitstring) : bitstring. 
+fun AES2E_4(bitstring, bitstring, bitstring, bitstring, bitstring) : bitstring. 
+fun Kyber_KKG(bitstring) : bitstring.    
+fun Kyber_KE(bitstring, bitstring, bitstring) : bitstring.                                 
+
+(* Destructors *)   
+reduc forall m1 : bitstring, m2 : bitstring, m3 : bitstring; AES2D_2(AES2E_2(m1, m2, m3), m3) = (m1, m2).     
+reduc forall m1 : bitstring, m2 : bitstring, m3 : bitstring, m4 : bitstring, m5 : bitstring; AES2D_4(AES2E_4(m1, m2, m3, m4, m5), m5) = (m1, m2, m3, m4).
+reduc forall m1 : bitstring, m2 : bitstring, m3 : bitstring; Kyber_KD(m1, Kyber_KE(Kyber_KKG(m1), m2, m3)) = m2.             
+
+(* queries *)
+query attacker (ID_SM). 
+query attacker (ID_NESU). 
+query attacker (SSK). 
+query ID : bitstring; inj-event (SessionTerminated (ID)) ==> inj-event (SessionStarted (ID)).
+
+(* Events *)
+event SessionStarted (bitstring).
+event SessionTerminated (bitstring).
+
+
+
+(* SM *)
+let pSM =
+new SK_SM : bitstring;
+new v_SM : bitstring;
+new k_SM : bitstring;
+new x_SM : bitstring;
+new y_SM : bitstring;
+new r_SM : bitstring;
+new T_SM : bitstring;
+let PK_SM = Kyber_KKG(SK_SM) in
+let V_SM = SHA2_1(v_SM) in
+out (PriCh, (PK_SM, V_SM));
+in (PriCh, (EID_SM : bitstring));
+let X_SM = Kyber_KKG(x_SM) in
+let K_SM = SHA2_1(k_SM) in
+let E_SM = AES2E_4(EID_SM, X_SM, y_SM, v_SM, K_SM) in
+in (PubCh, (EID_NESU : bitstring, PK_NESU : bitstring, V_NESU : bitstring));
+let R_SM = SHA2_1(r_SM) in
+let C_SM = Kyber_KE(PK_NESU, K_SM, R_SM) in
+let H_SM = SHA3_5(EID_SM, X_SM, y_SM, v_SM, T_SM) in
+event SessionStarted(ID_NESU);
+out (PubCh, (E_SM, C_SM, H_SM, T_SM));
+in (PubCh, (xE_NESU : bitstring, xC_NESU_1 : bitstring, xC_NESU_2 : bitstring, xH_NESU : bitstring));
+let xK_NESU = Kyber_KD(SK_SM, xC_NESU_1) in 
+let (xy_NESU : bitstring, xv_NESU : bitstring) = AES2D_2(xE_NESU, xK_NESU) in
+let xX_NESU = Kyber_KD(x_SM, xC_NESU_2) in
+let SSK_SM = SHA3_5(y_SM, xy_NESU, xv_NESU, v_SM, xX_NESU) in
+out (PubCh, AES2E_1(SSK, SSK_SM));
+let xxH_NESU = SHA3_5(SSK_SM, xy_NESU, xv_NESU, xX_NESU, T_SM) in
+if (xH_NESU = xxH_NESU) then
+event SessionTerminated(ID_NESU);
+let A_SM = SHA3_3(EID_SM, SSK_SM, T_SM) in
+out (PubCh, (A_SM));
+0.
+
+
+(* CCC *)
+let pCCC =
+new SK_CCC : bitstring;
+new x_CCC : bitstring;
+in (PriCh, (PK_SM : bitstring, V_SM : bitstring));
+let EID_SM = AES2E_2(ID_SM, x_CCC, SK_CCC) in
+out (PubCh, (EID_SM, PK_SM, V_SM));
+out (PubCh, (EID_SM));
+0.
+
+
+(* NESU *)
+let pNESU =
+new SK_NESU : bitstring;
+new v_NESU : bitstring;
+new k_NESU : bitstring;
+new x_NESU : bitstring;
+new y_NESU : bitstring;
+new r_NESU : bitstring;
+let PK_NESU = Kyber_KKG(SK_NESU) in
+let V_NESU = SHA2_1(v_NESU) in
+out (PriCh, (PK_NESU, V_NESU));
+in (PriCh, (EID_NESU : bitstring));
+in (PubCh, (xE_SM : bitstring, xC_SM : bitstring, xH_SM : bitstring, xT_SM : bitstring));
+let xK_SM = Kyber_KD(SK_NESU, xC_SM) in 
+let (xEID_SM : bitstring, xX_SM : bitstring, xy_SM : bitstring, xv_SM : bitstring) = AES2D_4(xE_SM, xK_SM) in
+let xxH_SM = SHA3_5(xEID_SM, xX_SM, xy_SM, xv_SM, xT_SM) in
+if (xH_SM = xxH_SM) then
+in (PubCh, (EID_SM : bitstring, PK_SM : bitstring, V_SM : bitstring));
+let xV_SM = SHA2_1(xv_SM) in
+if (V_SM = xV_SM) then
+let X_NESU = SHA2_1(x_NESU) in
+let SSK_NESU = SHA3_5(xy_SM, y_NESU, v_NESU, xv_SM, X_NESU) in
+out (PubCh, AES2E_1(SSK, SSK_NESU));
+let K_NESU = SHA2_1(k_NESU) in
+let E_NESU = AES2E_2(y_NESU, v_NESU, K_NESU) in
+let R_NESU = SHA2_1(r_NESU) in
+let C_NESU_1 = Kyber_KE(PK_SM, K_NESU, R_NESU) in
+let C_NESU_2 = Kyber_KE(xX_SM,  X_NESU, R_NESU) in
+let H_NESU = SHA3_5(SSK_NESU, y_NESU, v_NESU, X_NESU, xT_SM) in
+out (PubCh, (E_NESU, C_NESU_1, C_NESU_2, H_NESU));
+in (PubCh, (xA_SM : bitstring));
+let xxA_SM = SHA3_3(xEID_SM, SSK_NESU, xT_SM) in
+if (xA_SM = xxA_SM) then
+0.
+
+
+(* CCnesu *)
+let pCCnesu =
+new SK_CCnesu : bitstring;
+new x_CCnesu : bitstring;
+in (PriCh, (PK_NESU : bitstring, V_NESU : bitstring));
+let EID_NESU = AES2E_2(ID_NESU, x_CCnesu, SK_CCnesu) in
+out (PubCh, (EID_NESU, PK_NESU, V_NESU));
+out (PriCh, (EID_NESU));
+0.
+
+process 
+  ((pCCC) | (pCCnesu) | (!pSM) | (!pNESU))
