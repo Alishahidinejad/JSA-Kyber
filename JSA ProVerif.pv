@@ -1,131 +1,298 @@
-(* Channel Definition *)  
-free PriCh : channel [private]. 
-free PubCh : channel.
+(*
+  smart_grid_protocol_table_exact.pv
 
-(* Private Parameters *)
-free ID_SM : bitstring [private].
-free ID_NESU : bitstring [private].
-free SSK : bitstring [private].
+  Symbolic ProVerif model of the protocol in:
+    - Table 2 (SM registration, required by Table 4)
+    - Table 3 (NESU registration)
+    - Table 4 (authentication and key exchange)
 
-(* Functions *)
-fun SHA2_1(bitstring) : bitstring.   
-fun SHA3_3(bitstring, bitstring, bitstring) : bitstring.       
-fun SHA3_5(bitstring, bitstring, bitstring, bitstring, bitstring) : bitstring.                                            
-fun AES2E_1(bitstring, bitstring) : bitstring.    
-fun AES2E_2(bitstring, bitstring, bitstring) : bitstring. 
-fun AES2E_4(bitstring, bitstring, bitstring, bitstring, bitstring) : bitstring. 
-fun Kyber_KKG(bitstring) : bitstring.    
-fun Kyber_KE(bitstring, bitstring, bitstring) : bitstring.                                 
+  Target: ProVerif 2.05, typed applied pi calculus.
 
-(* Destructors *)   
-reduc forall m1 : bitstring, m2 : bitstring, m3 : bitstring; AES2D_2(AES2E_2(m1, m2, m3), m3) = (m1, m2).     
-reduc forall m1 : bitstring, m2 : bitstring, m3 : bitstring, m4 : bitstring, m5 : bitstring; AES2D_4(AES2E_4(m1, m2, m3, m4, m5), m5) = (m1, m2, m3, m4).
-reduc forall m1 : bitstring, m2 : bitstring, m3 : bitstring; Kyber_KD(m1, Kyber_KE(Kyber_KKG(m1), m2, m3)) = m2.             
+  Important modelling choices:
+    * Kyber is abstracted as perfect randomized public-key encryption/KEM.
+    * Registration channels are private, matching the paper's secure-channel assumption.
+    * The permissioned DLT is represented by ProVerif tables, which are not attacker-readable.
+    * Timestamp arithmetic is not represented; freshness is abstracted by a fresh TSi.
+    * This file follows Table 4 literally: no replay cache is added, and the same alpha_j
+      is used in KEj1 and KEj2. See smart_grid_protocol.pv for the hardened variant.
+*)
 
-(* queries *)
-query attacker (ID_SM). 
-query attacker (ID_NESU). 
-query attacker (SSK). 
-query ID : bitstring; inj-event (SessionTerminated (ID)) ==> inj-event (SessionStarted (ID)).
+set traceDisplay = long.
+set ignoreTypes = false.
 
-(* Events *)
-event SessionStarted (bitstring).
-event SessionTerminated (bitstring).
+(* ------------------------------------------------------------------ *)
+(* Types and channels                                                  *)
+(* ------------------------------------------------------------------ *)
 
+type identity.
+type nonce.
+type timestamp.
+type symkey.
+type skey.
+type pkey.
+type sessionkey.
+type status.
 
+free c : channel.                         (* attacker-controlled network *)
+free cRegSM : channel [private].          (* secure SM <-> CCC setup *)
+free cRegNESU : channel [private].        (* secure NESU <-> CCC setup *)
+free cForwardNESU : channel [private].    (* secure CCC -> relevant SMs *)
 
-(* SM *)
-let pSM =
-new SK_SM : bitstring;
-new v_SM : bitstring;
-new k_SM : bitstring;
-new x_SM : bitstring;
-new y_SM : bitstring;
-new r_SM : bitstring;
-new T_SM : bitstring;
-let PK_SM = Kyber_KKG(SK_SM) in
-let V_SM = SHA2_1(v_SM) in
-out (PriCh, (PK_SM, V_SM));
-in (PriCh, (EID_SM : bitstring));
-let X_SM = Kyber_KKG(x_SM) in
-let K_SM = SHA2_1(k_SM) in
-let E_SM = AES2E_4(EID_SM, X_SM, y_SM, v_SM, K_SM) in
-in (PubCh, (EID_NESU : bitstring, PK_NESU : bitstring, V_NESU : bitstring));
-let R_SM = SHA2_1(r_SM) in
-let C_SM = Kyber_KE(PK_NESU, K_SM, R_SM) in
-let H_SM = SHA3_5(EID_SM, X_SM, y_SM, v_SM, T_SM) in
-event SessionStarted(ID_NESU);
-out (PubCh, (E_SM, C_SM, H_SM, T_SM));
-in (PubCh, (xE_NESU : bitstring, xC_NESU_1 : bitstring, xC_NESU_2 : bitstring, xH_NESU : bitstring));
-let xK_NESU = Kyber_KD(SK_SM, xC_NESU_1) in 
-let (xy_NESU : bitstring, xv_NESU : bitstring) = AES2D_2(xE_NESU, xK_NESU) in
-let xX_NESU = Kyber_KD(x_SM, xC_NESU_2) in
-let SSK_SM = SHA3_5(y_SM, xy_NESU, xv_NESU, v_SM, xX_NESU) in
-out (PubCh, AES2E_1(SSK, SSK_SM));
-let xxH_NESU = SHA3_5(SSK_SM, xy_NESU, xv_NESU, xX_NESU, T_SM) in
-if (xH_NESU = xxH_NESU) then
-event SessionTerminated(ID_NESU);
-let A_SM = SHA3_3(EID_SM, SSK_SM, T_SM) in
-out (PubCh, (A_SM));
-0.
+(* Long-lived identities and registration values for the representative pair. *)
+free IDSM : identity [private].
+free IDNESU : identity.
+free rSM : nonce [private].
+free rNESU : nonce [private].
+free SKC : symkey [private].
 
+const Active : status.
+const Revoked : status.
 
-(* CCC *)
-let pCCC =
-new SK_CCC : bitstring;
-new x_CCC : bitstring;
-in (PriCh, (PK_SM : bitstring, V_SM : bitstring));
-let EID_SM = AES2E_2(ID_SM, x_CCC, SK_CCC) in
-out (PubCh, (EID_SM, PK_SM, V_SM));
-out (PubCh, (EID_SM));
-0.
+(* A secret sent under an established session key.  Its phase-1 secrecy is
+   an operational forward-secrecy test for already protected traffic. *)
+free past_data : bitstring [private].
 
+(* ------------------------------------------------------------------ *)
+(* Cryptographic abstractions                                          *)
+(* ------------------------------------------------------------------ *)
 
-(* NESU *)
-let pNESU =
-new SK_NESU : bitstring;
-new v_NESU : bitstring;
-new k_NESU : bitstring;
-new x_NESU : bitstring;
-new y_NESU : bitstring;
-new r_NESU : bitstring;
-let PK_NESU = Kyber_KKG(SK_NESU) in
-let V_NESU = SHA2_1(v_NESU) in
-out (PriCh, (PK_NESU, V_NESU));
-in (PriCh, (EID_NESU : bitstring));
-in (PubCh, (xE_SM : bitstring, xC_SM : bitstring, xH_SM : bitstring, xT_SM : bitstring));
-let xK_SM = Kyber_KD(SK_NESU, xC_SM) in 
-let (xEID_SM : bitstring, xX_SM : bitstring, xy_SM : bitstring, xv_SM : bitstring) = AES2D_4(xE_SM, xK_SM) in
-let xxH_SM = SHA3_5(xEID_SM, xX_SM, xy_SM, xv_SM, xT_SM) in
-if (xH_SM = xxH_SM) then
-in (PubCh, (EID_SM : bitstring, PK_SM : bitstring, V_SM : bitstring));
-let xV_SM = SHA2_1(xv_SM) in
-if (V_SM = xV_SM) then
-let X_NESU = SHA2_1(x_NESU) in
-let SSK_NESU = SHA3_5(xy_SM, y_NESU, v_NESU, xv_SM, X_NESU) in
-out (PubCh, AES2E_1(SSK, SSK_NESU));
-let K_NESU = SHA2_1(k_NESU) in
-let E_NESU = AES2E_2(y_NESU, v_NESU, K_NESU) in
-let R_NESU = SHA2_1(r_NESU) in
-let C_NESU_1 = Kyber_KE(PK_SM, K_NESU, R_NESU) in
-let C_NESU_2 = Kyber_KE(xX_SM,  X_NESU, R_NESU) in
-let H_NESU = SHA3_5(SSK_NESU, y_NESU, v_NESU, X_NESU, xT_SM) in
-out (PubCh, (E_NESU, C_NESU_1, C_NESU_2, H_NESU));
-in (PubCh, (xA_SM : bitstring));
-let xxA_SM = SHA3_3(xEID_SM, SSK_NESU, xT_SM) in
-if (xA_SM = xxA_SM) then
-0.
+(* Public-key generation. *)
+fun pk(skey) : pkey.
 
+(* Randomized Kyber abstraction.  The third argument represents coins alpha. *)
+fun kem_enc(symkey, pkey, nonce) : bitstring.
+reduc forall m:symkey, sk:skey, a:nonce;
+      kem_dec(kem_enc(m, pk(sk), a), sk) = m.
 
-(* CCnesu *)
-let pCCnesu =
-new SK_CCnesu : bitstring;
-new x_CCnesu : bitstring;
-in (PriCh, (PK_NESU : bitstring, V_NESU : bitstring));
-let EID_NESU = AES2E_2(ID_NESU, x_CCnesu, SK_CCnesu) in
-out (PubCh, (EID_NESU, PK_NESU, V_NESU));
-out (PriCh, (EID_NESU));
-0.
+(* Symmetric authenticated encryption abstraction used for ESM_i and ESM_j. *)
+fun senc(bitstring, symkey) : bitstring.
+reduc forall m:bitstring, k:symkey;
+      sdec(senc(m,k),k) = m.
 
-process 
-  ((pCCC) | (pCCnesu) | (!pSM) | (!pNESU))
+(* Encryption of application data under the derived session key. *)
+fun data_enc(bitstring, sessionkey) : bitstring.
+reduc forall m:bitstring, k:sessionkey;
+      data_dec(data_enc(m,k),k) = m.
+
+(* Hash/commitment functions from the paper, separated by domain. *)
+fun hCommit(pkey, nonce) : bitstring.
+fun hITi(bitstring, pkey, nonce, nonce, timestamp) : bitstring.
+fun hKDF(symkey, nonce, nonce, nonce, nonce) : sessionkey.
+fun hITj(nonce, sessionkey, nonce, nonce, symkey, timestamp) : bitstring.
+fun hAck(bitstring, identity, timestamp, sessionkey) : bitstring.
+fun makeSID(bitstring, identity, timestamp, pkey, nonce) : bitstring.
+
+(* Let the attacker create timestamp-shaped terms; freshness is enforced by
+   the replay cache rather than by relying on an unforgeable timestamp type. *)
+fun attackerTimestamp(bitstring) : timestamp.
+
+(* ------------------------------------------------------------------ *)
+(* Tagged data structures and messages                                 *)
+(* ------------------------------------------------------------------ *)
+
+fun pidPlain(identity, nonce) : bitstring [data].
+fun smPayload(bitstring, pkey, nonce, nonce) : bitstring [data].
+fun nesuPayload(nonce, nonce) : bitstring [data].
+
+fun smRegMsg(identity, bitstring, pkey) : bitstring [data].
+fun pidReply(bitstring) : bitstring [data].
+fun nesuRegMsg(identity, bitstring, pkey) : bitstring [data].
+fun nesuForwardMsg(identity, bitstring, pkey) : bitstring [data].
+
+fun auth1(timestamp, bitstring, bitstring, bitstring) : bitstring [data].
+fun auth2(bitstring, bitstring, bitstring, bitstring) : bitstring [data].
+fun auth3(bitstring) : bitstring [data].
+
+(* ------------------------------------------------------------------ *)
+(* Permissioned ledger and replay state                                *)
+(* ------------------------------------------------------------------ *)
+
+table smLedger(bitstring, pkey, bitstring, status).
+table nesuLedger(identity, pkey, bitstring, status).
+
+(* ------------------------------------------------------------------ *)
+(* Events                                                              *)
+(* ------------------------------------------------------------------ *)
+
+event SMRegistrationStored(bitstring, pkey, bitstring).
+event NESURegistrationSent(identity, pkey, bitstring).
+event NESURegistrationStored(identity, pkey, bitstring).
+event NESUCredentialsForwarded(identity, pkey, bitstring).
+
+event ClientBegin(bitstring).
+event ServerStart(bitstring).
+event ClientEnd(bitstring).
+event ServerEnd(bitstring).
+
+event ServerComputedKey(bitstring, sessionkey).
+event ClientAcceptedKey(bitstring, sessionkey).
+event ServerAcceptedKey(bitstring, sessionkey).
+
+(* ------------------------------------------------------------------ *)
+(* Security queries                                                    *)
+(* ------------------------------------------------------------------ *)
+
+(* Table 3 registration consistency. *)
+query id:identity, p:pkey, r:bitstring;
+      event(NESUCredentialsForwarded(id,p,r))
+      ==> event(NESURegistrationStored(id,p,r)).
+
+(* Table 6: session-key confidentiality in the normal phase. *)
+query sid:bitstring, k:sessionkey;
+      event(ClientAcceptedKey(sid,k)) && attacker(k) phase 0.
+query sid:bitstring, k:sessionkey;
+      event(ServerAcceptedKey(sid,k)) && attacker(k) phase 0.
+
+(* Table 6: mutual entity authentication and key agreement. *)
+query sid:bitstring;
+      inj-event(ClientEnd(sid)) ==> inj-event(ServerStart(sid)).
+query sid:bitstring;
+      inj-event(ServerEnd(sid)) ==> inj-event(ClientEnd(sid)).
+query sid:bitstring, k:sessionkey;
+      event(ClientAcceptedKey(sid,k)) ==> event(ServerComputedKey(sid,k)).
+query sid:bitstring, k:sessionkey;
+      event(ServerAcceptedKey(sid,k)) ==> event(ClientAcceptedKey(sid,k)).
+
+(* A meaningful replay-resistance property: every completed server session
+   maps injectively to a unique honest client initiation. *)
+query sid:bitstring;
+      inj-event(ServerEnd(sid)) ==> inj-event(ClientBegin(sid)).
+
+(* Table 6's nonce-secrecy-style query, restricted to normal operation. *)
+query attacker(rSM) phase 0.
+query attacker(rNESU) phase 0.
+
+(* Table 6: user anonymity (the true SM identity is not learned). *)
+query attacker(IDSM) phase 0.
+
+(* Forward secrecy: after phase 0, all device long-term private material is
+   disclosed.  Previously established session keys and protected past data
+   should remain secret because m_j2 was encapsulated to the ephemeral sPK_i. *)
+query sid:bitstring, k:sessionkey;
+      event(ClientAcceptedKey(sid,k)) && attacker(k) phase 1.
+query sid:bitstring, k:sessionkey;
+      event(ServerAcceptedKey(sid,k)) && attacker(k) phase 1.
+query attacker(past_data) phase 1.
+
+(* ------------------------------------------------------------------ *)
+(* Registration processes                                              *)
+(* ------------------------------------------------------------------ *)
+
+let CCC() =
+  (* Table 2 prerequisite: SM registration. *)
+  in(cRegSM, smRegMsg(idSM:identity, Ri:bitstring, pkSM:pkey));
+  new ri:nonce;
+  let PIDi = senc(pidPlain(idSM,ri), SKC) in
+  insert smLedger(PIDi, pkSM, Ri, Active);
+  event SMRegistrationStored(PIDi,pkSM,Ri);
+  out(cRegSM, pidReply(PIDi));
+
+  (* Table 3: NESU registration and forwarding to the neighbourhood. *)
+  in(cRegNESU, nesuRegMsg(idj:identity, Rj:bitstring, pkj:pkey));
+  insert nesuLedger(idj,pkj,Rj,Active);
+  event NESURegistrationStored(idj,pkj,Rj);
+  out(cForwardNESU, nesuForwardMsg(idj,Rj,pkj));
+  event NESUCredentialsForwarded(idj,pkj,Rj).
+
+(* ------------------------------------------------------------------ *)
+(* Authentication/key-exchange roles                                  *)
+(* ------------------------------------------------------------------ *)
+
+let SMAuth(PIDi:bitstring, skSM:skey, PKNESU:pkey) =
+  (* Table 4, first flight. *)
+  new sski:skey;
+  let sPKi = pk(sski) in
+  new mi:symkey;
+  new sri:nonce;
+  new alphai:nonce;
+  new TSi:timestamp;
+  let ESMi = senc(smPayload(PIDi,sPKi,sri,rSM), mi) in
+  let KEi = kem_enc(mi,PKNESU,alphai) in
+  let ITi = hITi(PIDi,sPKi,sri,rSM,TSi) in
+  let sid = makeSID(PIDi,IDNESU,TSi,sPKi,sri) in
+  event ClientBegin(sid);
+  out(c,auth1(TSi,ITi,KEi,ESMi));
+
+  (* Table 4, second flight. *)
+  in(c,auth2(ITj:bitstring,KEj1:bitstring,KEj2:bitstring,ESMj:bitstring));
+  let mj1 = kem_dec(KEj1,skSM) in
+  let mj2 = kem_dec(KEj2,sski) in
+  let nesuPayload(srj:nonce,rNESUrecv:nonce) = sdec(ESMj,mj1) in
+  if rNESUrecv = rNESU then
+    let Sessionkey = hKDF(mj2,srj,sri,rNESUrecv,rSM) in
+    if ITj = hITj(rNESUrecv,Sessionkey,srj,sri,mj2,TSi) then
+      event ClientAcceptedKey(sid,Sessionkey);
+      event ClientEnd(sid);
+      let Acki = hAck(PIDi,IDNESU,TSi,Sessionkey) in
+      out(c,auth3(Acki));
+      out(c,data_enc(past_data,Sessionkey)).
+
+let NESUAuth(skNESU:skey) =
+  (* Table 4, receive and validate first flight. *)
+  in(c,auth1(TSi:timestamp,ITi:bitstring,KEi:bitstring,ESMi:bitstring));
+  let mi = kem_dec(KEi,skNESU) in
+  let smPayload(PIDi:bitstring,sPKi:pkey,sri:nonce,rSMrecv:nonce) = sdec(ESMi,mi) in
+  if ITi = hITi(PIDi,sPKi,sri,rSMrecv,TSi) then
+    get smLedger(=PIDi,PKSMi:pkey,Ri:bitstring,=Active) in
+    if Ri = hCommit(PKSMi,rSMrecv) then
+      let sid = makeSID(PIDi,IDNESU,TSi,sPKi,sri) in
+
+      (* Table 4, responder flight (literal transcription). *)
+      new mj1:symkey;
+      new mj2:symkey;
+      new srj:nonce;
+      new alphaj:nonce;
+      let ESMj = senc(nesuPayload(srj,rNESU),mj1) in
+      let KEj1 = kem_enc(mj1,PKSMi,alphaj) in
+      let KEj2 = kem_enc(mj2,sPKi,alphaj) in
+      let Sessionkey = hKDF(mj2,srj,sri,rNESU,rSMrecv) in
+      let ITj = hITj(rNESU,Sessionkey,srj,sri,mj2,TSi) in
+      event ServerComputedKey(sid,Sessionkey);
+      event ServerStart(sid);
+      out(c,auth2(ITj,KEj1,KEj2,ESMj));
+
+      (* Table 4, final acknowledgement. *)
+      in(c,auth3(Acki:bitstring));
+      if Acki = hAck(PIDi,IDNESU,TSi,Sessionkey) then
+        event ServerAcceptedKey(sid,Sessionkey);
+        event ServerEnd(sid).
+
+(* ------------------------------------------------------------------ *)
+(* Device setup and main process                                       *)
+(* ------------------------------------------------------------------ *)
+
+let SmartMeter(skSM:skey, pkSM:pkey) =
+  let Ri = hCommit(pkSM,rSM) in
+  out(cRegSM,smRegMsg(IDSM,Ri,pkSM));
+  in(cRegSM,pidReply(PIDi:bitstring));
+  in(cForwardNESU,nesuForwardMsg(=IDNESU,Rj:bitstring,PKNESU:pkey));
+  !SMAuth(PIDi,skSM,PKNESU).
+
+let NESU(skNESU:skey, pkNESU:pkey) =
+  let Rj = hCommit(pkNESU,rNESU) in
+  event NESURegistrationSent(IDNESU,pkNESU,Rj);
+  out(cRegNESU,nesuRegMsg(IDNESU,Rj,pkNESU));
+  !NESUAuth(skNESU).
+
+process
+  new skSM:skey;
+  new skNESU:skey;
+  let pkSM = pk(skSM) in
+  let pkNESU = pk(skNESU) in
+
+  (* Public keys are made public to avoid obtaining security merely by hiding
+     encryption keys.  Ledger contents and registration channels remain private. *)
+  out(c,pkSM);
+  out(c,pkNESU);
+
+  ( CCC()
+  | SmartMeter(skSM,pkSM)
+  | NESU(skNESU,pkNESU)
+
+    (* Post-session compromise used for the forward-secrecy queries. *)
+  | phase 1;
+    out(c,skSM);
+    out(c,skNESU);
+    out(c,rSM);
+    out(c,rNESU)
+  )
