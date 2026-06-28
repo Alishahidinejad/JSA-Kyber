@@ -39,4 +39,4 @@ The model is used to verify:
 Install ProVerif (version 2.05 or compatible), then run:
 
 ```bash
-proverif smart_grid_protocol_table_exact.pv
+proverif JSA-ProVerif.pv
