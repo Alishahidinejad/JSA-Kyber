@@ -1,0 +1,29 @@
+Verification summary:
+
+Query event(NESUCredentialsForwarded(id,p,r)) ==> event(NESURegistrationStored(id,p,r)) is true.
+
+Query not (event(ClientAcceptedKey(sid_3,k)) && attacker_sessionkey(k)) is true.
+
+Query not (event(ServerAcceptedKey(sid_3,k)) && attacker_sessionkey(k)) is true.
+
+Query inj-event(ClientEnd(sid_3)) ==> inj-event(ServerStart(sid_3)) is true.
+
+Query inj-event(ServerEnd(sid_3)) ==> inj-event(ClientEnd(sid_3)) is true.
+
+Query event(ClientAcceptedKey(sid_3,k)) ==> event(ServerComputedKey(sid_3,k)) is true.
+
+Query event(ServerAcceptedKey(sid_3,k)) ==> event(ClientAcceptedKey(sid_3,k)) is true.
+
+Query inj-event(ServerEnd(sid_3)) ==> inj-event(ClientBegin(sid_3)) is true.
+
+Query not attacker_nonce(rSM[]) is true.
+
+Query not attacker_nonce(rNESU[]) is true.
+
+Query not attacker_identity(IDSM[]) is true.
+
+Query not (event(ClientAcceptedKey(sid_3,k)) && attacker_sessionkey_p1(k)) is true.
+
+Query not (event(ServerAcceptedKey(sid_3,k)) && attacker_sessionkey_p1(k)) is true.
+
+Query not attacker_bitstring_p1(past_data[]) is true.
